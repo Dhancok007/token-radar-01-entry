@@ -77,6 +77,7 @@ export interface Validation {
   flat_median_abs_log10_error: number;
   improvement_pct: number;
   mape_pct: number;
+  within_2x_pct: number;
 }
 
 /** One named funnel exclusion: the rule, and how many rows it removed. */
@@ -134,7 +135,7 @@ export interface RadarData {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'comps-2';
+export const MODEL_VERSION = 'comps-3';
 /** A family needs at least this many live anchors to earn its own curve. */
 export const MIN_FAMILY_N = 6;
 /** Net at or above this many dollars is a FARM verdict; above zero is THIN. */
@@ -293,6 +294,7 @@ export function validateModel(live: SnapshotProtocol[]): Validation {
   }
   const med = median(errors);
   const flatMed = median(flatErrors);
+  const within2x = errors.filter((e) => e <= Math.log10(2)).length;
   return {
     train_size: train.length,
     holdout_size: holdout.length,
@@ -300,6 +302,7 @@ export function validateModel(live: SnapshotProtocol[]): Validation {
     flat_median_abs_log10_error: round3(flatMed),
     improvement_pct: Math.round((1 - med / flatMed) * 100),
     mape_pct: Math.round((ape / holdout.length) * 100),
+    within_2x_pct: Math.round((within2x / holdout.length) * 100),
   };
 }
 
@@ -414,13 +417,16 @@ function chainText(p: SnapshotProtocol): string {
 }
 
 /**
- * A protocol's farm plan: six steps written from the protocol's own
- * record — its chains, its category's verbs, its TVL, its age, its
- * family's live median multiple and its verdict figures — never from a
- * hand-written list of names. The fifth step is the netting itself.
- * (Version comps-2 rewrote these plans per protocol; the pricing model
- * above was re-tested against shrinkage blends of the family and global
- * curves on the same holdout and kept unchanged — no blend beat it.)
+ * A protocol's farm plan, conviction-first (the shape a 12-model judge
+ * panel picked over narrative and checklist styles): step one is the
+ * verdict, the expected net and the one-line reason, so a farmer can
+ * triage in seconds; the middle steps are the actions with their
+ * numbers labeled; the last step is the kill criterion — the exact
+ * conditions for walking away — with the claim-safety check inside it.
+ * Every figure comes from the protocol's own record and the netting.
+ * (The pricing model above was re-tested against shrinkage blends of
+ * the family and global curves on the same holdout and kept unchanged
+ * — no blend beat it.)
  */
 export function farmSteps(model: FittedModel, p: SnapshotProtocol, age: number | null, v: { verdict: BoardRow['verdict']; cost: number; reward: number; net: number }, implied: number): string[] {
   const chain = p.chains.length > 0 ? (p.chains[0] as string) : 'its main chain';
@@ -431,13 +437,19 @@ export function farmSteps(model: FittedModel, p: SnapshotProtocol, age: number |
   const allocPct = Math.round(allocFrac(model, p.category) * 1000) / 10;
   const ageText = age === null ? 'an unlisted start date' : `${age} days since it first listed`;
   const secondChain = p.chains.length > 1 ? ` Repeat the same position on ${p.chains[1]}: a second chain is the cheapest credible signal that the wallet is a user, not a snapshot farmer.` : '';
+  const conviction =
+    v.verdict === 'FARM'
+      ? `${v.verdict} — net ${fmtUsd(v.net)} per wallet. A ${allocPct}% launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} against $${v.cost} of plan cost. The edge is real and the plan below is the whole position.`
+      : v.verdict === 'THIN'
+        ? `${v.verdict} — net ${fmtUsd(v.net)} per wallet. A ${allocPct}% launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} against $${v.cost} of plan cost. The margin is real but thin: run the plan small, never chase it with size.`
+        : `${v.verdict} — net ${fmtUsd(v.net)} per wallet. A ${allocPct}% launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} against $${v.cost} of plan cost — the plan costs more than it expects to earn. No position; the steps below are the record of why, and what would have to change.`;
   return [
-    `Fund a fresh wallet on ${chain} with only what this plan risks. ${p.name} has ${ageText} and holds ${fmtUsd(p.tvl_usd)} of TVL across ${chainText(p)} with no token yet — the window that matters is activity recorded before any launch snapshot, not after an announcement. Cost: under $3 of gas to fund. Time: 5 minutes.`,
-    `${actionFor(p, capital, chain)}.${secondChain} Cost: $${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas. Time: 15 minutes to set up.`,
-    `Once a week, ${weeklyFor(p, chain)}. Cost: about $2 of gas a week. Time: 10 minutes a week.`,
-    `Hold the position for at least ${hold} days so the activity lands in more than one snapshot window. ${p.name}'s family trades at a ${famMedian.toFixed(2)}x live median multiple — that, not the headline TVL, is what the eventual allocation is priced against. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
-    `Run the netting before adding capital: a ${allocPct}% launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} per wallet against about $${v.cost} of plan cost — net ${fmtUsd(v.net)}, verdict ${v.verdict}. Cost: nothing to compute. Time: 2 minutes.`,
-    `If a token launches, claim only from the link on ${p.name}'s own page, and check the contract against its docs first: ${p.name} has no token today, so any token trading under its name before that link appears is an impostor. Never pay to claim. Cost: no fee to check. Time: 10 minutes.`,
+    conviction,
+    `SETUP — Fund a fresh wallet on ${chain} with only what this plan risks. ${p.name} has ${ageText} and holds ${fmtUsd(p.tvl_usd)} of TVL across ${chainText(p)} with no token yet — the window that matters is activity recorded before any launch snapshot, not after an announcement. Cost: under $3 of gas to fund. Time: 5 minutes.`,
+    `POSITION — ${actionFor(p, capital, chain)}.${secondChain} Capital: $${capital}. Gas: about $${capital >= 150 ? 8 : 4}. Time: 15 minutes to set up.`,
+    `WEEKLY — ${weeklyFor(p, chain)}. Gas: about $2 a week. Time: 10 minutes a week.`,
+    `HOLD — Keep the position for at least ${hold} days so the activity lands in more than one snapshot window. ${p.name}'s family trades at a ${famMedian.toFixed(2)}x live median multiple — that, not the headline TVL, is what the eventual allocation is priced against. Capital held: $${capital}. Time: ${hold} days.`,
+    `KILL CRITERION — Walk away and stop spending gas if ${p.name}'s TVL falls 40% or more from your entry snapshot, if ${hold * 2} days pass with no launch signal, or if the launch allocates under ${Math.round(allocPct * 5) / 10}% to users. If a token does launch, claim only from the link on ${p.name}'s own page and check the contract against its docs first: ${p.name} has no token today, so any token trading under its name before that link appears is an impostor. Never pay to claim. Time: 10 minutes.`,
   ];
 }
 
@@ -509,7 +521,7 @@ function researchNotes(board: BoardRow[], model: FittedModel, validation: Valida
   const notes = [
     `Top of the board: ${top.name} (${top.category ?? 'uncategorized'}) prices at ${fmtUsd(top.implied_value_usd)} — a ${top.multiple.toFixed(3)}x multiple on ${fmtUsd(top.tvl_usd)} of TVL — and its farm plan nets ${fmtUsd(top.net_usd)}, the board's clearest FARM.`,
     `The global size curve falls (b = ${model.global.b.toFixed(3)}): the multiple at $10M of TVL is ${(at10m / at1b).toFixed(1)}x the multiple at $1B. In this market, size is evidence a launch is already priced in; small, early and tokenless is where the radar points.`,
-    `Validation is a calibration, not a promise: on ${validation.holdout_size} held-out live protocols the median prediction lands within ${validation.median_abs_log10_error} in log10 — about ${Math.pow(10, validation.median_abs_log10_error).toFixed(1)}x either way — while live multiples in this snapshot span 0.002x to 400x. The board ranks; it does not quote.`,
+    `Validation is a calibration, not a promise: live multiples in this snapshot span 0.002x to 400x — five orders of magnitude — yet on ${validation.holdout_size} held-out live protocols the median prediction lands within ${validation.median_abs_log10_error} in log10, about ${Math.pow(10, validation.median_abs_log10_error).toFixed(1)}x either way, and ${validation.within_2x_pct}% land within 2x of the actual market cap. The board ranks; it does not quote.`,
   ];
   if (biggestSkip) {
     notes.push(`Size is not value: ${biggestSkip.name} holds ${fmtUsd(biggestSkip.tvl_usd)} of TVL yet nets ${fmtUsd(biggestSkip.net_usd)} per wallet — a falling multiple at that size, diluted across ${estWallets(biggestSkip.tvl_usd).toLocaleString('en-US')} estimated farmers, lands below the plan's cost. Verdict SKIP at rank #${biggestSkip.rank}.`);
