@@ -134,7 +134,7 @@ export interface RadarData {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'comps-1';
+export const MODEL_VERSION = 'comps-2';
 /** A family needs at least this many live anchors to earn its own curve. */
 export const MIN_FAMILY_N = 6;
 /** Net at or above this many dollars is a FARM verdict; above zero is THIN. */
@@ -393,24 +393,51 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open`;
 }
 
+/** The weekly qualifying action, in the protocol's own category's words. */
+function weeklyFor(p: SnapshotProtocol, chain: string): string {
+  const c = (p.category ?? '').toLowerCase();
+  const name = p.name;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `repay a slice of the borrow and draw it again on ${name}, so both sides of the market see the wallet every week`;
+  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `rebalance the ${name} position on ${chain} — harvest, top up or shift the range — so the liquidity never reads as parked`;
+  if (c.includes('bridge')) return `bridge a small amount through ${name} in the other direction, so the wallet has flow both ways`;
+  if (c.includes('staking') || c.includes('restak')) return `top up the ${name} stake by a few dollars, so the position grows like a believer's, not a snapshot tourist's`;
+  if (c.includes('perpetual') || c.includes('derivative')) return `open and close one small hedge on ${name}, so the wallet carries real trading history, not just a deposit`;
+  if (c.includes('curator') || c.includes('allocator')) return `move a few dollars between two ${name} vaults on ${chain}, so the wallet follows the curator like a real allocator`;
+  return `repeat the core action in ${name} with a small amount, so the wallet reads as a returning user, not a one-day sybil`;
+}
+
+/** The protocol's chains as a sentence fragment: the first three named, the rest counted. */
+function chainText(p: SnapshotProtocol): string {
+  if (p.chains.length === 0) return 'its main chain';
+  const named = p.chains.slice(0, 3).join(', ');
+  return p.chains.length > 3 ? `${named} and ${p.chains.length - 3} more chains` : named;
+}
+
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time,
- * the fifth being the netting itself. Derived from the protocol's own
- * record (category, chains, TVL, age) and its verdict figures, never from
- * a hand-written list of names.
+ * A protocol's farm plan: six steps written from the protocol's own
+ * record — its chains, its category's verbs, its TVL, its age, its
+ * family's live median multiple and its verdict figures — never from a
+ * hand-written list of names. The fifth step is the netting itself.
+ * (Version comps-2 rewrote these plans per protocol; the pricing model
+ * above was re-tested against shrinkage blends of the family and global
+ * curves on the same holdout and kept unchanged — no blend beat it.)
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null, v: { verdict: BoardRow['verdict']; cost: number; reward: number; net: number }, implied: number): string[] {
+export function farmSteps(model: FittedModel, p: SnapshotProtocol, age: number | null, v: { verdict: BoardRow['verdict']; cost: number; reward: number; net: number }, implied: number): string[] {
   const chain = p.chains.length > 0 ? (p.chains[0] as string) : 'its main chain';
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const wallets = estWallets(p.tvl_usd);
+  const famMedian = (p.category !== null ? model.medianRatioByCategory.get(p.category) : undefined) ?? model.globalMedianRatio;
+  const allocPct = Math.round(allocFrac(model, p.category) * 1000) / 10;
+  const ageText = age === null ? 'an unlisted start date' : `${age} days since it first listed`;
+  const secondChain = p.chains.length > 1 ? ` Repeat the same position on ${p.chains[1]}: a second chain is the cheapest credible signal that the wallet is a user, not a snapshot farmer.` : '';
   return [
-    `Use a fresh wallet that holds only the funds you plan to farm ${p.name} with, and keep its seed phrase offline. Cost: under $3 of gas for the first transaction. Time: 5 minutes.`,
-    `${actionFor(p, capital, chain)}. Cost: $${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas. Time: 15 minutes to set up.`,
-    `Make one qualifying action each week — a deposit, a borrow, a swap or a vote — so the wallet reads as a returning user, not a one-day sybil. Cost: about $2 of gas a week. Time: 10 minutes a week.`,
-    `Hold the position for at least ${hold} days so the activity lands in more than one snapshot window. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
-    `Run the netting before adding capital: a launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} per wallet against about $${v.cost} of plan cost — net ${fmtUsd(v.net)}, verdict ${v.verdict}. Cost: nothing to compute. Time: 2 minutes.`,
-    `If a token launches, claim only from the link on the protocol's own page, and write the wallet, the dates and every transaction in a farm log first. Cost: no fee to check, and never pay to claim. Time: 10 minutes.`,
+    `Fund a fresh wallet on ${chain} with only what this plan risks. ${p.name} has ${ageText} and holds ${fmtUsd(p.tvl_usd)} of TVL across ${chainText(p)} with no token yet — the window that matters is activity recorded before any launch snapshot, not after an announcement. Cost: under $3 of gas to fund. Time: 5 minutes.`,
+    `${actionFor(p, capital, chain)}.${secondChain} Cost: $${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas. Time: 15 minutes to set up.`,
+    `Once a week, ${weeklyFor(p, chain)}. Cost: about $2 of gas a week. Time: 10 minutes a week.`,
+    `Hold the position for at least ${hold} days so the activity lands in more than one snapshot window. ${p.name}'s family trades at a ${famMedian.toFixed(2)}x live median multiple — that, not the headline TVL, is what the eventual allocation is priced against. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
+    `Run the netting before adding capital: a ${allocPct}% launch allocation on the ${fmtUsd(implied)} implied value, split across an estimated ${wallets.toLocaleString('en-US')} farming wallets, pays about ${fmtUsd(v.reward)} per wallet against about $${v.cost} of plan cost — net ${fmtUsd(v.net)}, verdict ${v.verdict}. Cost: nothing to compute. Time: 2 minutes.`,
+    `If a token launches, claim only from the link on ${p.name}'s own page, and check the contract against its docs first: ${p.name} has no token today, so any token trading under its name before that link appears is an impostor. Never pay to claim. Cost: no fee to check. Time: 10 minutes.`,
   ];
 }
 
@@ -456,7 +483,7 @@ export function buildBoard(snapshot: Snapshot, model: FittedModel): { board: Boa
       est_reward_usd: round2(s.v.reward),
       net_usd: round2(s.v.net),
       watchlist: watchlist.has(s.p.slug),
-      farm_steps: farmSteps(s.p, s.age, s.v, implied),
+      farm_steps: farmSteps(model, s.p, s.age, s.v, implied),
     };
   });
   const funnel: RadarData['funnel'] = {
